@@ -1,0 +1,270 @@
+#cloud-config
+apt_proxy: http://172.16.16.1:8000/
+http_proxy: http://172.16.16.1:8000/
+apt_update: true
+
+_foo: &SSH_KEY "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQDE2/sW+LvzjlXBYx0pas17yuV7pSQeXOYAPwe8Z54md9o5doMg845JaNCofxARxLSqSVPhnUjvUNDYFaYzxU0J4+xGHjVNJbyPCzxWrlIajVvvoEPXw88uDJVYaLoc3r04u8Qh0R/eN5v/qtDidc4+uVL6L4VMaHEzQykYg9LiYgdVxJ/2kFLgbM1jXmho4nJRopsTCGDMKLpg+CSdvbdwOKuQAQbj4e6fvvOQQA69Q7Or+74LsX+T0YTWnDjFklGpCYLvz75lkB2pQCXa5yMI0XIaqbKgVMpG9Qi4q48LXUTKGpLDZndyxHjhn8A47WABiLZdG+l8BRI56s4VlpiH d1cor@sapito"
+
+#Traigo el usuario de LaunchPad
+
+users:
+  - name: ubuntu
+    shell: /bin/bash
+    sudo: ['ALL=(ALL) NOPASSWD:ALL']
+    ssh-authorized-keys:
+      - *SSH_KEY
+    ssh-import-id: [jjo, navarrow, "EDITAR_LP"]
+    lock_passwd: true
+
+#apt_update: true
+
+#Instalo paquetes necesarios
+
+packages:
+  - apache2-mpm-prefork
+  - php5
+  - php5-mysql
+  - libapache2-mod-php5
+  - curl
+  - postfix
+  - mlocate
+  - unzip
+  - php5-gd
+  - libssh2-php
+
+_foo: &DEPLOY_SH |
+  #!/bin/bash
+  #Descargamos consul
+  cd /tmp
+  wget http://192.168.3.251/consul/0.6.4/consul_0.6.4_linux_amd64.zip
+  unzip *.zip
+  cp consul /usr/local/sbin
+  #creamos users dirs para consul
+  useradd -d /var/consul -m consul
+  mkdir -p /etc/consul.d
+  # Mostramos resultado
+  my_ip=$(ip r get 1 | sed -nr 's/.*src (\S+).*/\1/p')
+  echo "*** INFO: READY, browse:"
+  echo "    http://${my_ip?}/php-mysql"
+  echo "*** INFO: END $0 $*"
+  sleep 20
+  exit 0
+  echo "----------------------------------------------------------deploy"
+
+_foo: &DEPLOYWORDPRESS_SH |
+  #!/bin/bash
+  #Instalo Wordpress
+  cd /tmp
+  wget http://wordpress.org/latest.tar.gz
+  tar -xvzf latest.tar.gz
+  cd /tmp/wordpress/
+  cp wp-config-sample.php wp-config.php
+  #Comunicacion con la Base de Datos
+  #reemplazar parámetros buscados (s/) permanentemente (-i), hacer backup de archivo original (.bak) y reemplaza todas las palabras que coincidan (/g)
+  sed -i.bak 's/database_name_here/wordpress_db/g' wp-config.php
+  sed -i.bak 's/username_here/wordpress_user/g' wp-config.php
+  sed -i.bak 's/password_here/supersecretisimo/g' wp-config.php
+  sed -i.bak 's/localhost/EDITAR_ENV-EDITAR_USUARIO-db.node.cloud.um.edu.ar/g' wp-config.php
+  #Creo link simbólico
+  sync -avP /tmp/wordpress/ /var/www/html/
+  #Dueño y grupos necesarios
+  chown demo:www-data -R *
+  mkdir /var/www/html/wp-content/uploads
+  chown -R :www-data /var/www/html/wp-content/uploads
+  echo "---------------------------------------------------------------WP UP"
+
+_foo: &CONSUL_CONF |
+  {
+    "server": false,
+    "datacenter": "um-01",
+    "data_dir": "/var/consul",
+    "encrypt": "GIMbRTkH/rLwqjOWrMzrcw==",
+    "log_level": "INFO",
+    "domain": "cloud.um.edu.ar",
+    "enable_syslog": true,
+    "start_join": ["192.168.3.130"]
+  }
+
+_foo: &CONSUL_SERVICE |
+  {
+    "service":
+      {
+        "name": "web",
+        "tags": ["apache"],
+        "port": 80
+      }
+  }
+
+_foo: &CONSUL_INIT |
+  #! /bin/sh
+  ### BEGIN INIT INFO
+  # Provides:          consul
+  # Required-Start:    $syslog $time $remote_fs
+  # Required-Stop:     $syslog $time $remote_fs
+  # Default-Start:     2 3 4 5
+  # Default-Stop:      0 1 6
+  # Short-Description: Services/nodes/kv discovery and storage
+  # Description:       Debian init script for the consul agent
+  ### END INIT INFO
+  #
+  # Author:            Diego Navarro <navarrow@gmail.com>
+  #
+
+  PATH=/bin:/usr/bin:/sbin:/usr/sbin
+  DAEMON=/usr/local/sbin/consul
+  PIDFILE=/var/run/consul
+
+  test -x $DAEMON || exit 0
+
+  . /lib/lsb/init-functions
+
+  case "$1" in
+    start)
+          log_daemon_msg "Starting consul agent" "consul"
+          start_daemon -p $PIDFILE $DAEMON agent -config-dir /etc/consul.d -client 0.0.0.0
+          log_end_msg $?
+      ;;
+    stop)
+          log_daemon_msg "Stoping consul agent" "consul"
+          killproc -p $PIDFILE $DAEMON
+          log_end_msg $?
+      ;;
+    force-reload|restart)
+      $0 stop
+      $0 start
+      ;;
+    status)
+      status_of_proc -p $PIDFILE $DAEMON consul && exit 0 || exit $?
+      ;;
+    *)
+      echo "Usage: /etc/init.d/consul {start|stop|restart|force-reload|status}"
+      exit 1
+      ;;
+  esac
+  exit 0
+
+_foo: &CONFIG_APACHE_SH |
+  #!/bin/bash
+  METADATA=http://169.254.169.254/latest/meta-data/
+  public_hostname=$(curl -s $METADATA/public-hostname)
+  public_hostname=EDITAR_USUARIO.node.cloud.um.edu.ar
+  public_ipv4=$(curl -s $METADATA/public-ipv4)
+  local_ipv4=$(curl -s $METADATA/local-ipv4)
+  # jjo: add .conf (required by more recent apache-s)
+  cat > /etc/apache2/sites-available/wordpress.conf <<EOF
+  <VirtualHost *:80>
+      UseCanonicalName off
+      Options All
+      ServerAdmin webmaster@localhost
+      ServerName $public_hostname
+      ServerAlias $local_ipv4
+      VirtualDocumentRoot /var/www/html
+      RewriteEngine on
+      RewriteRule ^/wp-uploads/(.*)$ /var/www/wp-uploads/%{HTTP_HOST}/\$1
+      ErrorLog \${APACHE_LOG_DIR}/wordpress-error.log
+      LogLevel warn
+      CustomLog \${APACHE_LOG_DIR}/wordpress-access.log combined
+  </VirtualHost>
+  EOF
+  a2enmod rewrite vhost_alias
+  #a2dissite 000-default
+  #muevo index x seguridad
+  mv /var/www/html/index.html /var/www/html/index.php.orig
+  a2ensite wordpress
+  service apache2 restart
+  echo "-------------------------------------------------------------------Apache Instalado/configurado"
+
+
+_foo: &CONFIG_POSTFIX_SH |
+  #!/bin/bash
+  #manda mails - Server SMTP
+  METADATA=http://169.254.169.254/latest/meta-data/
+  public_hostname=$(curl -s $METADATA/public-hostname)
+  public_hostname=web-EDITAR_USUARIO.node.cloud.um.edu.ar
+  postconf -e myhostname=$public_hostname
+  postconf -e mydestination=$public_hostname,localhost
+  echo $public_hostname > /etc/mailname
+  echo "---------------------------------------------------------------------Correo.... al p2"
+
+_foo: &CONFIG_MYSQL_SH |
+  #!/bin/bash
+  #METADATA=http://169.254.169.254/latest/meta-data/
+  #public_hostname=$(curl -s $METADATA/public-hostname)
+  #public_hostname=wp_norepo-EDITAR_USUARIO.node.cloud.um.edu.ar
+  #local_ipv4=$(curl -s $METADATA/local-ipv4)
+  #/etc/init.d/mysql restart
+
+  #lo atamo con alambre por aca :S
+  #echo "$local_ipv4 wp-EDITAR_USUARIO.node.cloud.um.edu.ar" >> /etc/hosts
+
+  # setup local wordpress
+  #zcat /usr/share/doc/wordpress/examples/setup-mysql.gz > /tmp/setup-mysql.sh
+  # use local_ipv4 instead of public_hostname
+  #echo "bash /tmp/setup-mysql.sh -n wordpress $public_hostname"
+  set -x
+  #bash -x /tmp/setup-mysql.sh -n wordpress $public_hostname > /root/my.log 2>&1
+  #bash /usr/share/doc/wordpress/examples/setup-mysql -n wordpress $public_hostname
+  #ln -s /usr/share/wordpress /var/www/$public_hostname
+
+  #Ponemos el mysql a atender por la red
+  sed -i.bak 's/127.0.0.1/0.0.0.0/g' /etc/mysql/mysql.conf.d/mysqld.cnf
+  #Restarteamos
+  /etc/init.d/mysql restart
+  #creo DB
+  echo "CREATE DATABASE wordpress_db" | mysql -u root
+  #Al usuario  wordpress con la clave le acceso a la db wordpress_db
+  echo "GRANT ALL PRIVILEGES ON wordpress_db.* TO 'wordpress_user'@'%' IDENTIFIED BY 'supersecretisimo';" | mysql -u root
+  # Con storage ahora no se dropea
+  # echo "DROP DATABASE webapp_db; " | mysql -u root
+  #echo "CREATE DATABASE wordpress_db" | mysql -u root
+  #echo "/usr/local/src/boot_ip.sh" >> /etc/rc.local
+  echo "---------------------------------------------------------------------------------------------------------Instalado MySQL"
+
+groups:
+  - umcloud
+users:
+  - name: ubuntu
+    shell: /bin/bash
+    sudo: ['ALL=(ALL) NOPASSWD:ALL']
+    ssh-authorized-keys:
+      - *SSH_KEY
+    ssh-import-id: [jjo, navarrow, "EDITAR_LP"]
+    lock_passwd: true
+
+write_files:
+  - content: *DEPLOY_SH
+    path: /usr/local/src/deploy.sh
+    permissions: '0755'
+  - content: *DEPLOYWORDPRESS_SH
+    path: /usr/local/src/deploywp.sh
+    permissions: '0755'
+  - content: *CONSUL_CONF
+    path: /etc/consul.d/client.json
+    permissions: '0644'
+  - content: *CONSUL_SERVICE
+    path: /etc/consul.d/wp.json
+    permissions: '0644'
+  - content: *CONSUL_INIT
+    path: /etc/init.d/consul
+    permissions: '0755'
+  - content: *CONFIG_APACHE_SH
+    path: /usr/local/src/config_apache.sh
+    permissions: '0755'
+  - content: *CONFIG_MYSQL_SH
+    path: /usr/local/src/config_mysql.sh
+    permissions: '0755'
+  - content: *CONFIG_POSTFIX_SH
+    path: /usr/local/src/config_postfix.sh
+    permissions: '0755'
+
+
+runcmd:
+  - [/usr/local/src/deploy.sh]
+  - [update-rc.d, consul, defaults]
+  - [service, consul, start]
+  - [/usr/local/src/config_apache.sh]
+  - [/usr/local/src/config_postfix.sh]
+  - [/usr/local/src/deploywp.sh]
+  - [service, apache2, restart]
+  - [service, postfix, reload]
+  - [/tmp/config_mysql.sh]
